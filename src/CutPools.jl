@@ -1,73 +1,85 @@
-module CutSeparator
+module CutPools
 
 using JuMP
 
-export Separator, Oracle, CutPool,
-       separate, separator_callback
+export Separator, Oracle, CuttingPlane, CutPool,
+       separate, separator_callback, addfamily!
 
 abstract Separator
 abstract Oracle <: Separator
 
+type CuttingPlane
+    ineq::LinearConstraint
+    added::Bool
+    CuttingPlane(ineq::LinearConstraint) = new(ineq,false)
+end
+
+type CutFamily
+    cuts::Vector{CuttingPlane}
+    name::String
+end
+
 type CutPool <: Separator
-    pool::Vector{LinearConstraint}
-    added::Vector{Bool}
+    pool::Vector{CuttingPlane}
     clear_used::Bool
+    groups::Vector{CutFamily}
 end
-CutPool() = CutPool(LinearConstraint[], Bool[], true)
+CutPool() = CutPool(CuttingPlane[], true, CutFamily[])
 
-function Base.push!(x::CutPool,y)
-    push!(x.pool,y)
-    push!(x.added,false)
+function addfamily!(pool::CutPool, cp::Vector{LinearConstraint}, name::String)
+    cuts = [CuttingPlane(c) for c in cp]
+    append!(pool.pool, cuts)
+    push!(pool.groups, CutFamily(cuts,name))
 end
 
-function Base.append!(x::CutPool,y)
-    append!(x.pool,y)
-    append!(x.added,fill(false,length(y)))
-end
+Base.push!(x::CutPool,y) = push!(x.pool,CuttingPlane(y))
+Base.append!(x::CutPool,y) = append!(x.pool,[CuttingPlane(c) for c in y])
 
 const ε = 1e-4
 const ratio_pool_reshuffle = 0.1
 
 function separate(cutpool::CutPool)
-    separated = LinearConstraint[]
-    for it in 1:length(cutpool.pool)
-        cutpool.added[it] && continue
-        cut = cutpool.pool[it]
-        val = getValue(cut.terms)
-        lb, ub = cut.lb, cut.ub
+    separated = CuttingPlane[]
+    num_sep = 0
+    for cut in cutpool.pool
+        if cut.added
+            num_sep += 1
+            continue
+        end
+        val = getValue(cut.ineq.terms)
+        lb, ub = cut.ineq.lb, cut.ineq.ub
         if (lb - val) / abs(min(lb,val,ε)) > ε ||
            (val - ub) / abs(min(ub,val,ε)) > ε
             push!(separated, cut)
-            cutpool.added[it] = true
+            cut.added = true
+            num_sep += 1
         end
     end
 
     if cutpool.clear_used &&
-    length(separated) > ratio_pool_reshuffle*length(cutpool.pool)
-        indices = filter(1:length(cutpool.pool)) do it
-            !cutpool.added[it]
+    num_sep > ratio_pool_reshuffle*length(cutpool.pool)
+        filter!(cutpool.pool) do cut
+            !cut.added
         end
-        cutpool.pool  = cutpool.pool[indices]
-        cutpool.added = fill(false, length(indices))
     end
 
     return separated
 end
 
-function __separator_callback(cb, cutpool::CutPool, maxnum::Int)
+function _separator_callback(cb, cutpool::CutPool, maxnum::Int)
     tic()
     cuts_added = 0
     cuts = separate(cutpool)
     for cut in cuts
         cuts_added += 1
-        addUserCut(cb, cut)
+        addUserCut(cb, cut.ineq)
         cuts_added ≥ maxnum && break
     end
     el = toq()
-    println("Adding $(min(length(cuts),maxnum)) cuts in $el seconds")
+    # println("Adding $(min(length(cuts),maxnum)) cuts in $el seconds")
 end
 
 separator_callback(cutpool::CutPool; maxnum=100) =
-    (cb -> __separator_callback(cb, cutpool, maxnum))
+    (cb -> _separator_callback(cb, cutpool, maxnum))
 
 end
